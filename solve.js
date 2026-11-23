@@ -438,6 +438,13 @@ function findSingleStar(s, from) {
 /** The characters that start inline markup: backslash, backtick, `*`, `[`. */
 const SPEC_RE = /[\\`*[]/g;
 
+/** The next markup character in `s` at or after `from`, or -1. */
+function nextSpecial(s, from) {
+  SPEC_RE.lastIndex = from;
+  const m = SPEC_RE.exec(s);
+  return m === null ? -1 : m.index;
+}
+
 /**
  * `s` rendered inline; `env.link(target)` is a link's href.
  * Plain runs are escaped once per run: HTML escaping works character by
@@ -450,22 +457,13 @@ export function inline(s, env) {
   let out = '';
   let i = 0;
   let start = 0; // the plain run now being collected starts here
-  const flush = (end) => {
-    if (end > start) out += escapeHtml(s.slice(start, end));
-  };
-  /** The next markup character at or after `from`, or -1. */
-  const nextSpecial = (from) => {
-    SPEC_RE.lastIndex = from;
-    const m = SPEC_RE.exec(s);
-    return m === null ? -1 : m.index;
-  };
   while (i < s.length) {
-    const ns = nextSpecial(i);
+    const ns = nextSpecial(s, i);
     if (ns === -1) break; // the rest is plain text; the final flush takes it
     i = ns;
     const c = s.charCodeAt(i);
     if (c === 92 && i + 1 < s.length && ESCAPABLE[s.charCodeAt(i + 1)] === 1) {
-      flush(i);
+      if (i > start) out += escapeHtml(s.slice(start, i));
       // Of the escapable characters only '>' changes under HTML escaping.
       out += ESCAPES[s[i + 1]] ?? s[i + 1];
       i += 2;
@@ -475,7 +473,7 @@ export function inline(s, env) {
     if (c === 96) { // '`'
       const j = s.indexOf('`', i + 1);
       if (j > i + 1) {
-        flush(i);
+        if (i > start) out += escapeHtml(s.slice(start, i));
         out += `<code>${escapeHtml(s.slice(i + 1, j))}</code>`;
         i = j + 1;
         start = i;
@@ -488,7 +486,7 @@ export function inline(s, env) {
       if (s.charCodeAt(i + 1) === 42) {
         const j = findUnescaped(s, '**', i + 2);
         if (j > i + 2) {
-          flush(i);
+          if (i > start) out += escapeHtml(s.slice(start, i));
           out += `<strong>${inline(s.slice(i + 2, j), env)}</strong>`;
           i = j + 2;
           start = i;
@@ -499,7 +497,7 @@ export function inline(s, env) {
       }
       const j = findSingleStar(s, i + 1);
       if (j > i + 1) {
-        flush(i);
+        if (i > start) out += escapeHtml(s.slice(start, i));
         out += `<em>${inline(s.slice(i + 1, j), env)}</em>`;
         i = j + 1;
         start = i;
@@ -513,7 +511,7 @@ export function inline(s, env) {
       const m = k !== -1 && s.charCodeAt(k + 1) === 40 ? s.indexOf(')', k + 2) : -1;
       const target = m === -1 ? '' : s.slice(k + 2, m);
       if (target !== '' && !/\s/.test(target)) {
-        flush(i);
+        if (i > start) out += escapeHtml(s.slice(start, i));
         out += `<a href="${escapeHtml(env.link(target))}">${inline(s.slice(i + 1, k), env)}</a>`;
         i = m + 1;
         start = i;
@@ -524,7 +522,7 @@ export function inline(s, env) {
     }
     i++;
   }
-  flush(s.length);
+  if (s.length > start) out += escapeHtml(s.slice(start, s.length));
   return out;
 }
 
@@ -654,6 +652,26 @@ function textOf(v) {
   return '';
 }
 
+/**
+ * textOf, then HTML-escaped, in one call: a number or boolean's digits
+ * never hold an escapable character, and escaping is per character, so
+ * escaping an array's joined text is escaping each item and joining.
+ * Exactly escapeHtml(textOf(v)) for every value.
+ */
+function escTxt(v) {
+  if (typeof v === 'string') return escapeHtml(v);
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) {
+    let s = '';
+    for (let i = 0; i < v.length; i++) {
+      if (i > 0) s += ', ';
+      s += escTxt(v[i]);
+    }
+    return s;
+  }
+  return '';
+}
+
 /** Whether a value counts as true in an if: not undefined, null, false, "", 0 or an empty array. */
 function truthy(v) {
   if (Array.isArray(v)) return v.length > 0;
@@ -672,7 +690,7 @@ export function renderNodes(nodes, scope, ctx, depth) {
         out += n.text;
         break;
       case 'var':
-        out += ctx.escape(textOf(lookup(scope, n.path)));
+        out += escTxt(lookup(scope, n.path));
         break;
       case 'raw':
         out += textOf(lookup(scope, n.path));
@@ -736,7 +754,7 @@ function compileNodes(nodes, scopeVar, depthVar, code, temps, state) {
         code.push(`out += ${JSON.stringify(n.text)};`);
         break;
       case 'var':
-        code.push(`out += esc(txt(${pathExpr(n.path, scopeVar, temps)}));`);
+        code.push(`out += escTxt(${pathExpr(n.path, scopeVar, temps)});`);
         break;
       case 'raw':
         code.push(`out += txt(${pathExpr(n.path, scopeVar, temps)});`);
@@ -757,8 +775,16 @@ function compileNodes(nodes, scopeVar, depthVar, code, temps, state) {
         const xs = `_x${temps.next++}`;
         const kk = `_k${temps.next++}`;
         const sc = `_s${temps.next++}`;
-        temps.names.push(xs, kk, sc);
-        code.push(`{ const ${xs} = ${pathExpr(n.path, scopeVar, temps)}; if (Array.isArray(${xs})) { for (let ${kk} = 0; ${kk} < ${xs}.length; ${kk}++) { const ${sc} = Object.create(${scopeVar}); ${sc}[${JSON.stringify(n.name)}] = ${xs}[${kk}]; ${sc}.loop = { index: ${kk} + 1, first: ${kk} === 0, last: ${kk} === ${xs}.length - 1, length: ${xs}.length };`);
+        const lp = `_l${temps.next++}`;
+        temps.names.push(xs, kk, sc, lp);
+        // One child scope and one loop record per loop, not per iteration:
+        // rendering is synchronous string building, so nothing can observe
+        // an iteration's scope after the next one overwrites its bindings,
+        // and the scope's shape stays fixed (two properties), which keeps
+        // V8's inline caches monomorphic. (Mutating the PARENT scope
+        // instead was tried and was slower; a dedicated child scope is not
+        // the same thing.)
+        code.push(`{ const ${xs} = ${pathExpr(n.path, scopeVar, temps)}; if (Array.isArray(${xs})) { const ${sc} = Object.create(${scopeVar}); const ${lp} = { index: 0, first: true, last: false, length: ${xs}.length }; ${sc}.loop = ${lp}; for (let ${kk} = 0; ${kk} < ${xs}.length; ${kk}++) { ${sc}[${JSON.stringify(n.name)}] = ${xs}[${kk}]; ${lp}.index = ${kk} + 1; ${lp}.first = ${kk} === 0; ${lp}.last = ${kk} === ${xs}.length - 1;`);
         compileNodes(n.body, sc, depthVar, code, temps, state);
         code.push('} } }');
         break;
@@ -766,7 +792,7 @@ function compileNodes(nodes, scopeVar, depthVar, code, temps, state) {
       case 'include': {
         const f = `_f${temps.next++}`;
         temps.names.push(f);
-        code.push(`out += ${depthVar} >= 8 ? '' : ((${f} = C.compiled.get(${JSON.stringify(n.name)})) !== undefined ? ${f}(${scopeVar}, C, ${depthVar} + 1, esc, txt, truthy, inc) : inc(C, ${JSON.stringify(n.name)}, ${scopeVar}, ${depthVar}));`);
+        code.push(`out += ${depthVar} >= 8 ? '' : ((${f} = C.compiled.get(${JSON.stringify(n.name)})) !== undefined ? ${f}(${scopeVar}, C, ${depthVar} + 1, escTxt, txt, truthy, inc) : inc(C, ${JSON.stringify(n.name)}, ${scopeVar}, ${depthVar}));`);
         break;
       }
     }
@@ -780,7 +806,7 @@ function compileTemplate(nodes) {
   compileNodes(nodes, 'S', 'D', code, temps, null);
   const decls = temps.names.length > 0 ? `let ${temps.names.join(',')};` : '';
   const src = `"use strict"; let out = ""; ${decls} ${code.join('\n')} return out;`;
-  return new Function('S', 'C', 'D', 'esc', 'txt', 'truthy', 'inc', src);
+  return new Function('S', 'C', 'D', 'escTxt', 'txt', 'truthy', 'inc', src);
 }
 
 /** A prototype-chained compiled scope as the tree walker's { vars, parent } chain. */
@@ -803,7 +829,7 @@ function chainScope(scopeObj) {
 function incFn(C, name, scope, depth) {
   if (depth >= INCLUDE_DEPTH) return '';
   const f = C.compiled.get(name);
-  if (f !== undefined) return f(scope, C, depth + 1, escapeHtml, textOf, truthy, incFn);
+  if (f !== undefined) return f(scope, C, depth + 1, escTxt, textOf, truthy, incFn);
   const nodes = C.templates.get(name);
   if (nodes === undefined) return '';
   return renderNodes(nodes, chainScope(scope), C, depth + 1);
@@ -848,11 +874,6 @@ export function build(input) {
     try {
       const nodes = parseTemplate(name, input.templates[name]);
       templates.set(name, nodes);
-      try {
-        compiled.set(name, compileTemplate(nodes));
-      } catch {
-        // The tree-walking renderer below renders this template instead.
-      }
     } catch (err) {
       if (!(err instanceof TemplateError)) throw err;
       report.push(err.message);
@@ -931,6 +952,44 @@ export function build(input) {
     s.outDir = dir === '' ? slug : `${dir}/${slug}`;
     s.url = `${b.base}/${s.outDir}/`;
     b.bySource.set(s.path, s);
+  }
+
+  // Compile only the templates this build renders: the kept sources'
+  // layouts, the index/tag/tags pages, and their transitive includes.
+  // A template that is never rendered is never compiled; if one were
+  // rendered after all, the tree-walking renderer below renders it, so
+  // the output is unchanged and only the speed differs.
+  {
+    const used = new Set();
+    const queue = [];
+    for (const s of b.sources) queue.push(s.layout);
+    for (const n of ['index', 'tag', 'tags']) if (templates.has(n)) queue.push(n);
+    const collect = (nodes) => {
+      for (const nd of nodes) {
+        if (nd.kind === 'include') queue.push(nd.name);
+        else if (nd.kind === 'for') collect(nd.body);
+        else if (nd.kind === 'if') {
+          collect(nd.then);
+          if (nd.else !== null) collect(nd.else);
+        }
+      }
+    };
+    while (queue.length > 0) {
+      const n = queue.pop();
+      if (used.has(n)) continue;
+      used.add(n);
+      const nodes = templates.get(n);
+      if (nodes !== undefined) collect(nodes);
+    }
+    for (const n of used) {
+      const nodes = templates.get(n);
+      if (nodes === undefined) continue;
+      try {
+        compiled.set(n, compileTemplate(nodes));
+      } catch {
+        // The tree-walking renderer below renders this template instead.
+      }
+    }
   }
 
   // 4. Each body's Markdown, its links resolved to the pages and static files they name.
@@ -1050,7 +1109,7 @@ export function build(input) {
     scope.recent = recent;
     Object.assign(scope, vars);
     const fn = b.compiled.get(name);
-    if (fn !== undefined) return fn(scope, ctx, 0, escapeHtml, textOf, truthy, incFn);
+    if (fn !== undefined) return fn(scope, ctx, 0, escTxt, textOf, truthy, incFn);
     return renderNodes(nodes, { vars: scope, parent: null }, ctx, 0);
   };
   for (const s of b.sources) b.output[`${s.outDir}/index.html`] = render(s.layout, { page: pageOf(s) });
