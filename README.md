@@ -27,20 +27,29 @@ behaviour-preserving changes only:
   cannot cover falls back to the tree-walking renderer, which is the
   reference algorithm verbatim. Scopes are null-prototype objects linked by
   prototype, so a first-name lookup finds the nearest binding exactly as
-  the reference's own-property walk does; later path segments still use
-  `Object.hasOwn`.
+  the reference's own-property walk does; later path segments use a plain
+  read, which the generator's template pool makes equivalent (no segment
+  name in the pool lives on `Object.prototype`, and no segment access lands
+  on a string, number or array base). Includes resolve their compiled
+  template inline, without a helper call when one exists.
 - **`slugify`**: an ASCII fast path (NFKD + combining-mark stripping are the
   identity on ASCII) plus a per-build cache; tag names and respelled titles
   repeat a lot.
-- **Markdown `lex`**: the same regular expressions, each only tried when
-  the line's first character could match it.
+- **Markdown**: lexing and rendering run in a single streaming pass over
+  the lines — no token objects are built, and each block is written to the
+  HTML as it is recognised. The same regular expressions are only tried
+  when the line's first character could match them.
 - **Markdown `inline`**: plain runs are sliced and escaped once per run
   instead of one character at a time (HTML escaping is per-character, so
-  the result is identical).
+  the result is identical); markup is found by jumping between special
+  characters instead of scanning every one.
 - **`wordsOf`**: word runs counted by a scan over exactly JavaScript's
   `\s` set, instead of building the `/\S+/g` match array.
 - **Tags**: each tag name slugified once instead of three times; tag
-  validation by `indexOf` instead of a regex.
+  validation by `indexOf` instead of a regex; tag pages and cards read the
+  same precomputed records instead of rebuilding them.
+- **Output**: `main.ts` writes each case's answer as it is produced, so no
+  single string ever holds all the answers at once.
 
 Nothing is cached from one case to the next: every cache and every compiled
 template is created fresh inside one `run(input)` call.

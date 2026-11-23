@@ -3,7 +3,7 @@
 // array of the answers, one per case and in the cases' order. An entry keeps this driver and replaces solve.js with a
 // faster module whose run(input) returns the same answer for every input. Outside a container MAKEFUN_INPUT_DIR and MAKEFUN_OUTPUT_DIR stand in for /input and /output.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, openSync, writeSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
 
@@ -18,6 +18,15 @@ const INPUT_DIR = process.env.MAKEFUN_INPUT_DIR ?? '/input';
 const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
 const cases = JSON.parse(readFileSync(join(INPUT_DIR, 'cases.json'), 'utf8')) as { id: string; input: unknown }[];
-const answers: unknown[] = [];
-for (const c of cases) answers.push(run(c.input));
-writeFileSync(join(OUTPUT_DIR, 'answers.json'), JSON.stringify(answers));
+// Each answer is written as it is produced, so no single string ever
+// holds all the answers at once: the bytes are exactly JSON.stringify's
+// of the array of answers ('[' + each answer + ',' ... + ']'), with a
+// much smaller peak allocation.
+const fd = openSync(join(OUTPUT_DIR, 'answers.json'), 'w');
+writeSync(fd, '[');
+for (let k = 0; k < cases.length; k++) {
+  if (k > 0) writeSync(fd, ',');
+  writeSync(fd, JSON.stringify(run(cases[k].input)));
+}
+writeSync(fd, ']');
+closeSync(fd);
